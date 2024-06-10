@@ -27,14 +27,14 @@
 #include <Math.h>
 #define PERIOD 1100
 //#define PWM_PERIOD 20000  // Define the PWM period in clock cycles (e.g., 20 ms at 1 MHz)
-volatile const int unitsFC = 360;                          // Units in a full circle
+volatile const int units_full_circle = 360;                          // Units in a full circle
 volatile int dutyScale = 1000;                       // Scale duty cycle to 1/1000ths
 volatile float dcMin = 2.9;                             // Minimum duty cycle
 volatile float dcMax = 97.1;                            // Maximum duty cycle
 volatile const int q2min = 90;                      // For checking if in 1st quadrant
 volatile int q3max = 90 * 3;                      // For checking if in 4th quadrant
 volatile int turns = 0;
-volatile float dc, theta, thetaP, thigh, tlow,  powerOutput, echo_end ,overflow_count,echo_start,total ,totalTargetAngle, error;
+volatile float dc, theta, thetaP, thigh, tlow,  powerOutput, echo_end ,overflow_count,echo_start, totalTargetAngle, error;
 volatile int targetAngle = 200;
 volatile float dt = 0.0f;
 volatile float pulse_width = 0;
@@ -42,7 +42,7 @@ uint32_t Error = 0;
 uint32_t setpoint = 0;
 uint32_t prevsetpoint = 0;
 volatile uint32_t tcycle = 0;
-volatile float DutyCycle = 0;
+volatile float PWM_duty_cycle = 0;
 volatile float angel = 0;
 volatile float offset  = 0;
 volatile float errorAngle =  0 ;
@@ -58,6 +58,7 @@ volatile uint32_t risingEdgeTimestamp = 0;
 volatile uint32_t fallingEdgeTimestamp = 0;
 volatile const double MAX_PULSE_WIDTH_US = 65535;
 volatile bool capture_flag =false;
+volatile bool capture_done_flag = false;
 bool up = false;
 float currentAngle;
 volatile uint32_t TimeDelay;
@@ -94,42 +95,22 @@ void TIM4_IRQHandler(void) {
 	// Rising or falling edge trigger:
 	if (TIM4->SR & TIM_SR_CC1IF) {
 
-		// Firstly, clear the timer interrupt flag
 		TIM4->SR &= ~TIM_SR_CC1IF;
-		if (!capture_flag) {		 // Rising edge
-			thigh = TIM4->CCR1;
-			// Switch to capture the the falling edge:
-			TIM4->CCER ^= TIM_CCER_CC1P;
-			capture_flag = 1;
-			overflow_count = 0; // Set overflow counts to 0, as this is the start.
-		} else {                   // Falling edge
-			tlow = TIM4->CCR1; // Store time of the falling edge using CCR
-			if (thigh > tlow)
-		    {
-				total = thigh + (65535 - thigh);
-			}
-			else if(tlow>thigh)
-			{
-				total = tlow - thigh;
-			}
-			pulse_width = total/100;
-
-			DutyCycle = ((pulse_width )) / ( (1.1 ))*100;
-			 float newTheta = (unitsFC - 1) - ((DutyCycle - dcMin) * unitsFC) / (dcMax - dcMin + 1);
-
-			            // Calculate turns based on quadrant transitions
-			            if ((newTheta < q2min) && (theta > q3max)) { // If 4th to 1st quadrant
-			                turns++;
-			            } else if ((theta < q2min) && (newTheta > q3max)) { // If in 1st to 4th quadrant
-			                turns--;
-			            }
-
-			            theta = newTheta;
-			// Switch back to capture the rising edge
-			TIM4->CCER ^= TIM_CCER_CC1P;
-			capture_flag = 0;
+		if (!capture_flag) {		       // Rising edge
+			thigh = TIM4->CCR1;          // Store time of rising edge
+			TIM4->CCER ^= TIM_CCER_CC1P; // Switch to capturing falling edge
+			capture_flag = true;
+			overflow_count = 0;          // Reset overflow, as this is a new time capture
+		} else { // Falling edge
+			tlow = TIM4->CCR1;           // Store time of the falling edge using CCR
+      capture_flag = false;
+      capture_done_flag = true;
+			TIM4->CCER ^= TIM_CCER_CC1P; // Switch back to capture the rising edge
 		}
 	}
+  
+  // Overflow of TIM4, increment the overflow count
+  // to ensure proper calculation of time duration.
 	if (TIM4->SR & TIM_SR_UIF) {
 		TIM4->SR &= ~TIM_SR_UIF;
 		if (capture_flag) {
@@ -138,58 +119,78 @@ void TIM4_IRQHandler(void) {
 	}
 }
 
+#define TIM4_MAX_CLOCK 65536
+#define SERVO_ENCODER_MAX_PWM_TIME_MS 1.1
+
+void calculate_elevator_turn_activity(void) {
+  if (!capture_done_flag) return;
+
+  total_time_elapsed = (tlow - thigh) + overflow_count * TIM4_MAX_CLOCK; 
+  pulse_width = total_time_elapsed/1000;
+
+  PWM_duty_cycle = ((pulse_width) / (SERVO_ENCODER_MAX_PWM_TIME_MS)) * 100;
+  float newTheta = (units_full_circle - 1) - ((PWM_duty_cycle - dcMin) * units_full_circle) / (dcMax - dcMin + 1);
+
+  // Calculate turns based on rotational quadrants (see unit circle)
+  if ((newTheta < q2min) && (theta > q3max)) { // If 4th to 1st quadrant
+    turns++;
+  } else if ((theta < q2min) && (newTheta > q3max)) { // If in 1st to 4th quadrant
+    turns--;
+  }
+
+  capture_done_flag = 
+  theta = newTheta;
+}
+
 int main(void) {
-    HAL_Init();
-    __enable_irq();
-    SystemClock_Config();
-    TIM4_IRQHandler();
-    MX_GPIO_Init();
-    Timer4_Init();
-    HAL_TIM_Base_Start(&htim4);
-    HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
-    HAL_TIM_IC_CaptureCallback(&htim4);
-    TIM3_Configuration();
+  HAL_Init();
+  __enable_irq();
+  SystemClock_Config();
+  TIM4_IRQHandler();
+  MX_GPIO_Init();
+  Timer4_Init();
+  HAL_TIM_Base_Start(&htim4);
+  HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
+  HAL_TIM_IC_CaptureCallback(&htim4);
+  TIM3_Configuration();
 
-    float totalTurns = 2; // Number of turns before reaching the final angle (negative for reverse direction)
-        float finalAngle = targetAngle; // Final target angle
-         totalTargetAngle = totalTurns * unitsFC + finalAngle; // Total target angle including turns
+  float totalTurns = 2; // Number of turns before reaching the final angle (negative for reverse direction)
+  float finalAngle = targetAngle; // Final target angle
+  totalTargetAngle = totalTurns * units_full_circle + finalAngle; // Total target angle including turns
 
-        while (1) {
-                powerOutput = myPD(totalTargetAngle);
+  while (1) {
+    calculate_elevator_turn_activity();
+    powerOutput = myPD(totalTargetAngle);
 
-
-                if (up) {
-                	errorAngle = totalTargetAngle - ((turns * unitsFC) + theta);
-                    if (errorAngle > 0) {
-                        if (powerOutput > 4) {
-                            offset = 30;
-                        } else {
-                            offset = 0;
-                        }
-
-                    }
-                } else {
-                	errorAngle = (targetAngle % unitsFC) - theta;
-                        if (powerOutput > 4) {
-                            offset = -40;
-                        } else {
-                            offset = 0;
-                        }
-
-                }
-
-                TIM3->CCR2 = 1500 + offset;
-
-                HAL_Delay(20);
-            }
+    if (up) {
+      errorAngle = totalTargetAngle - ((turns * units_full_circle) + theta);
+      if (errorAngle > 0) {
+        if (powerOutput > 4) {
+          offset = 30;
+        } else {
+          offset = 0;
         }
+      }
+    } else {
+      errorAngle = (targetAngle % units_full_circle) - theta;
+      if (powerOutput > 4) {
+        offset = -40;
+      } else {
+        offset = 0;
+      }
+    }
+
+    TIM3->CCR2 = 1500 + offset; // Apply turning speed elevator servo 
+    HAL_Delay(20);              // => PID sample time
+  }
+}
 
 float myPD(uint32_t totalTargetAngle) {
     uint32_t currentTime = HAL_GetTick();
     dt = currentTime - previousTime;
     previousTime = currentTime;
 
-    currentAngle = (fabs(turns) * unitsFC) + theta;
+    currentAngle = (fabs(turns) * units_full_circle) + theta;
     error = totalTargetAngle - currentAngle;
     //float derivative = error - prevError; // Calculate the derivative term
     //prevError = error;
@@ -286,7 +287,7 @@ void Timer4_Init(void) {
     GPIOB->AFR[0] |= (2U << (4U * 6U));
 
 
-	TIM4->PSC = 71;
+	TIM4->PSC = 15;
 
 	TIM4->CCMR1 &= ~(TIM_CCMR1_CC1S | TIM_CCMR1_IC1PSC | TIM_CCMR1_IC1F);
 
