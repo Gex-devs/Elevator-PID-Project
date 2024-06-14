@@ -18,13 +18,19 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <stdbool.h>
+
 #include "stm32f3xx_hal_gpio.h" // Include the GPIO header file
 #include "stm32f3xx_hal_rcc.h" // Include the RCC header file
-#include"stm32f3xx_it.h"
+#include "stm32f3xx_it.h"
 #include "stm32f3xx_hal.h"
+
+#include <stdbool.h>
 #include <stdio.h>
 #include <Math.h>
+#include <string.h>
+#include <stdarg.h>
+
+
 #define PERIOD 1100
 //#define PWM_PERIOD 20000  // Define the PWM period in clock cycles (e.g., 20 ms at 1 MHz)
 volatile const int units_full_circle = 360;                          // Units in a full circle
@@ -68,6 +74,7 @@ void TIM4_Configuration(void);
 void Timer4_Init(void);
 
 /* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef huart3;
 TIM_HandleTypeDef htim4;
 
 /* USER CODE BEGIN PV */
@@ -75,22 +82,54 @@ TIM_HandleTypeDef htim4;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
+
+/* USER CODE BEGIN PFP */
+
+void UART_print(const char *string);
+void UART_print_formatted(const char *format, ...);
+
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 //static void MX_TIM4_Init(void);
-/* USER CODE BEGIN PFP */
+
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/* USER CODE END 0 */
+/**
+  * @brief UART transmission function to output a string to the serial monitor
+  * @param string the string literal to transmit over UART
+  * @author Wouter Swinkels
+ */
+void UART_print(const char *string) {
+    if (string != NULL) {
+    	HAL_UART_Transmit(&huart2, (uint8_t *)string, strlen(string), HAL_MAX_DELAY);
+    }
+}
+
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+  * @brief UART transmission of a string with formatting (like in `sprintf()`).
+  * @param string the string literal to transmit over UART, (e.g., "distance: %d")
+  * @param ... any parameters to be formatted into the string (e.g., int distance)
+  * @author Wouter Swinkels
+ */
+void UART_print_formatted(const char *format, ...) {
+    char UARTString[32]; // TODO maybe move this buffer to a const definition
+
+    va_list args;
+    va_start(args, format);
+    vsnprintf(UARTString, sizeof(UARTString), format, args);
+    va_end(args);
+    UART_print(UARTString); // Use UART_Print to transmit
+}
+
+
+
+
+
 void TIM4_IRQHandler(void) {
 	// Rising or falling edge trigger:
 	if (TIM4->SR & TIM_SR_CC1IF) {
@@ -125,7 +164,7 @@ void TIM4_IRQHandler(void) {
 void calculate_elevator_turn_activity(void) {
   if (!capture_done_flag) return;
 
-  total_time_elapsed = (tlow - thigh) + overflow_count * TIM4_MAX_CLOCK; 
+  uint32_t total_time_elapsed = (tlow - thigh) + overflow_count * TIM4_MAX_CLOCK;
   pulse_width = total_time_elapsed/1000;
 
   PWM_duty_cycle = ((pulse_width) / (SERVO_ENCODER_MAX_PWM_TIME_MS)) * 100;
@@ -138,20 +177,24 @@ void calculate_elevator_turn_activity(void) {
     turns--;
   }
 
-  capture_done_flag = 
+  capture_done_flag = 0;
   theta = newTheta;
 }
 
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int Return of program
+  */
 int main(void) {
   HAL_Init();
   __enable_irq();
   SystemClock_Config();
   TIM4_IRQHandler();
   MX_GPIO_Init();
+
   Timer4_Init();
-  HAL_TIM_Base_Start(&htim4);
-  HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
-  HAL_TIM_IC_CaptureCallback(&htim4);
   TIM3_Configuration();
 
   float totalTurns = 2; // Number of turns before reaching the final angle (negative for reverse direction)
@@ -159,29 +202,33 @@ int main(void) {
   totalTargetAngle = totalTurns * units_full_circle + finalAngle; // Total target angle including turns
 
   while (1) {
-    calculate_elevator_turn_activity();
-    powerOutput = myPD(totalTargetAngle);
-
-    if (up) {
-      errorAngle = totalTargetAngle - ((turns * units_full_circle) + theta);
-      if (errorAngle > 0) {
-        if (powerOutput > 4) {
-          offset = 30;
-        } else {
-          offset = 0;
-        }
-      }
-    } else {
-      errorAngle = (targetAngle % units_full_circle) - theta;
-      if (powerOutput > 4) {
-        offset = -40;
-      } else {
-        offset = 0;
-      }
-    }
-
-    TIM3->CCR2 = 1500 + offset; // Apply turning speed elevator servo 
-    HAL_Delay(20);              // => PID sample time
+	  static int whatevertest = 0;
+	  UART_Transmit("whatever in loop %d", &whatevertest);
+	  whatevertest++;
+	  HAL_delay(1000);
+//    calculate_elevator_turn_activity();
+//    powerOutput = myPD(totalTargetAngle);
+//
+//    if (up) {
+//      errorAngle = totalTargetAngle - ((turns * units_full_circle) + theta);
+//      if (errorAngle > 0) {
+//        if (powerOutput > 4) {
+//          offset = 30;
+//        } else {
+//          offset = 0;
+//        }
+//      }
+//    } else {
+//      errorAngle = (targetAngle % units_full_circle) - theta;
+//      if (powerOutput > 4) {
+//        offset = -40;
+//      } else {
+//        offset = 0;
+//      }
+//    }
+//
+//    TIM3->CCR2 = 1500 + offset; // Apply turning speed elevator servo
+//    HAL_Delay(20);              // => PID sample time
   }
 }
 
