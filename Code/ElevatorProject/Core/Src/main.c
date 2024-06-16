@@ -18,15 +18,15 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <Math.h>
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "PIDController.h"
 
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdbool.h>
-
 
 /* USER CODE END Includes */
 
@@ -38,6 +38,11 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+#define STEP_TIME_MS 20					  // Singular step time for the feedback loop
+#define TIMER_MAX_VALUE 65536			  // Maximum store value of General Purpose timer
+#define SERVO_ENCODER_MAX_PWM_TIME_MS 1.1 // Maximum PWM time of an encoder signal in milliseconds
+#define UNITS_FULL_CIRCLE 360			  // Units for a full angular rotation
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,6 +53,8 @@
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart2;
 
+/* USER CODE BEGIN PV */
+
 volatile bool capture_flag = false;		 // Used within ISR whether currently needing to capture rising or falling edge
 volatile bool capture_done_flag = false; // Used to see whether a full capture is done
 volatile bool overflow_flag = false;
@@ -56,7 +63,10 @@ volatile uint32_t thigh = 0;		     // Timestamp recorded for rising edge capture
 volatile uint32_t tlow = 0;				 // Timestamp recorded for falling edge capture
 volatile uint32_t overflow_count = 0;	 // CCR Overflow counter recorded during signal capture
 
-/* USER CODE BEGIN PV */
+// TODO rename the duty cycle constants to be more reflective
+
+const float dcMin = 2.9;	// Minimum duty cycle (of encoder capture)
+const float dcMax = 97.1;	// Maximum duty cycle (of encoder capture)
 
 /* USER CODE END PV */
 
@@ -65,7 +75,6 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 
-
 /* USER CODE BEGIN PFP */
 
 void UART_print(const char *string);
@@ -73,8 +82,9 @@ void UART_print_formatted(const char *format, ...);
 
 void TIM4_IRQHandler(void);
 void Timer4_Init(void);
+void TIM3_Configuration(void);
 
-float myPD(uint32_t setpoint);
+void calculateNewEncoderAngle(float* currentAngle, int* currentTurns);
 
 /* USER CODE END PFP */
 
@@ -99,7 +109,7 @@ void UART_print(const char *string) {
   * @author Wouter Swinkels
  */
 void UART_print_formatted(const char *format, ...) {
-    char UARTString[64]; // TODO maybe move this buffer to a const definition
+    char UARTString[64];
 
     va_list args;
     va_start(args, format);
@@ -140,8 +150,13 @@ void TIM4_IRQHandler(void) {
 	}
 }
 
-void TIM3_Configuration(void)
-{
+/**
+  * @brief TIM3 Initialization Function
+  * @details Sets TIM3 to a PWM output signal for a servo motor on a 50Hz frequency
+  * @param None
+  * @retval None
+  */
+void TIM3_Configuration(void) {
     RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
     RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
 
@@ -153,23 +168,23 @@ void TIM3_Configuration(void)
 
     RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
     TIM3->PSC = 71;
-    TIM3->ARR = 19999;         // Set auto-reload value (period of PWM signal)
+    TIM3->ARR = 19999; // Set auto-reload value to 50Hz (period of 20ms on 1MHz)
+
     TIM3->CCMR1 &= ~(TIM_CCMR1_OC2M);
     TIM3->CCMR1 |= (TIM_CCMR1_OC2M_1 | TIM_CCMR1_OC2M_2);
     TIM3->CCER |= TIM_CCER_CC2E;
     TIM3->CR1 |= TIM_CR1_CEN;
 
-    TIM3->CCR1 = 1500; // should set the signal to spec. 1.5ms over 20ms total
+    TIM3->CCR1 = 1500; // Set the signal to 1.5ms to pause the motor initially.
 }
 
 
 /**
   * @brief TIM4 Initialization Function
-  * @details
+  * @details Sets TIM4 to capturing both the rising and falling edges on a 1MHz capture rate.
   * @param None
   * @retval None
   */
-
 void Timer4_Init(void) {
 
     RCC->AHBENR |= RCC_AHBENR_GPIOBEN;	// Enable clock for GPIOB
@@ -210,29 +225,50 @@ void Timer4_Init(void) {
 	NVIC_SetPriority(TIM4_IRQn, 0);
 }
 
+void calculateNewEncoderAngle(float* currentAngle, int* currentTurns) {
+	if (!capture_done_flag) return; // no new encoder capture, angle stays the same.
+	capture_done_flag = false;
 
-#define TIMER_MAX_VALUE 65536
-#define SERVO_ENCODER_MAX_PWM_TIME_MS 1.1
-#define UNITS_FULL_CIRCLE 360
+	// 1. Calculate the capture tick time
+	//UART_print("New capture + angle update! ");
+	uint32_t ticks = ((tlow-thigh) + (overflow_count* (TIMER_MAX_VALUE + 1))) % (TIMER_MAX_VALUE + 1);
+	UART_print_formatted("ticks = %d\n", ticks);
 
-//const float dcMin = 2.9;		// Minimum duty cycle
-//const float dcMax = 97.1;	// Maximum duty cycle
+	// 2. Calculate the current angle from the duty cycle of the encoder:
+	float PWM_duty_cycle = ((ticks) / (1100.0f)) * 100.0f;
+	UART_print_formatted("dc = %d\n", (int)PWM_duty_cycle);
+	if (PWM_duty_cycle > 100) return; // wrong duty cycle. May happen with initial captures on bootup
+	float motorTheta = (UNITS_FULL_CIRCLE - 1) - ((PWM_duty_cycle - dcMin) * UNITS_FULL_CIRCLE) / (dcMax - dcMin + 1);
+	UART_print_formatted("measured = %d\n", (int)motorTheta);
 
-const float dcMin = 0.0;
-const float dcMax = 100.0;
-volatile float errorAngle = 0;
-volatile int targetAngle = 200;
-volatile float totalTargetAngle = 200;
+	// 3. Check whether the new angle has made any full cycle turns, and
+	//    apply those turns accordingly.
+
+    float angleDifference = motorTheta - *currentAngle;
+
+    if (angleDifference > 180.0f) {
+        UART_print("wrapped from 360 to 0");
+        while(1);
+        (*currentTurns)--;
+    } else if (angleDifference < -180.0f) {
+        UART_print("wrapped from 0 to 360");
+        while(1);
+    	(*currentTurns)++;
+    }
+
+	// 4. Update the current angle:
+	*currentAngle = motorTheta;
+
+	UART_print_formatted("turns=%d\t", *currentTurns);
+	UART_print_formatted("angle=%d\n", (int)*currentAngle);
 
 
-bool up = true;
-int turns = 0 ;
-float powerOutput = 0 ;
-int KP = 1;
-float offset = 0 ;
-float newTheta =0;
-float currentAngle = 0 ;
-// Overflow counter for TIM4 allowing correct timer capture
+}
+
+void updateMotorSpeed(double normalisedControlUpdate, uint32_t maxTickDeviation) {
+	uint32_t newMotorSpeed = (uint32_t)(normalisedControlUpdate * (double)maxTickDeviation);
+	TIM3->CCR1 = 1500 + newMotorSpeed;
+}
 
 
 /* USER CODE END 0 */
@@ -246,89 +282,67 @@ int main(void) {
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-  /* Configure the system clock */
   SystemClock_Config();
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
 
-  Timer4_Init(); // Initialise TIM4 with input capture on PB6
-  TIM3_Configuration();
+  /* Setup timers: */
 
-  /* USER CODE BEGIN 2 */
+  Timer4_Init(); 		// Initialise TIM4 with input capture on PB6
+  TIM3_Configuration(); // Initialise TIM3 to a PWM signal for the motor control
 
+  /* Setup the angles to be used by the motor: */
 
+  float currentAngle = 0.0; // The current angle of the motor
+  int currentTurns = 0;     // The current amount of full-degree turns the motor has made (used for calculating total)
 
-  /* USER CODE END 2 */
+  /* Setup the PID controller */
 
-  static int incrementer = 0;
-  turns = 2; // Number of turns before reaching the final angle (negative for reverse direction)
-  float finalAngle = targetAngle; // Final target angle
-  totalTargetAngle = turns * UNITS_FULL_CIRCLE + finalAngle; // Total target angle including turns
+  double Kp = 3.0;
+  double Ki = 0.0; // Will evaluate to a PD controller if Ki is zero.
+  double Kd = 0.01;
+  double timeDelta = 20.0;  // Time delta of step function (used for integral and derivative calculations)
+  double maxError = 1000.0; // Max expected (thus point of saturated normalized value) error in degrees
 
+  PIDController* pid = initPIDController(Kp, Ki, Kd, timeDelta, maxError);
+
+  if (pid == NULL) {
+	  UART_print("Failed to setup PID controller");
+	  while(1); // Halt
+  }
+
+  HAL_Delay(1000); // Wait to ensure that initial capture is already completed
+  	  	  	     // Otherwise, one gets erronous values.
+
+  // Retrieve the initial angle from the encoder:
+  calculateNewEncoderAngle(&currentAngle, &currentTurns);
+
+  double targetDegree = 500.0; // Example target degree.
+  setPIDStep(pid, targetDegree, currentAngle);
 
   while (1) {
-	  //UART_print_formatted("test string %d", incrementer);
-	  incrementer++;
-	  HAL_Delay(100);
-	  powerOutput = myPD(totalTargetAngle);
 
-	  // Step 1. Remeasure the current angle of the servo motor
-	  if (capture_done_flag) {
-		  UART_print("Capture done! ");
-		  uint32_t ticks = ((tlow-thigh) + (overflow_count* (TIMER_MAX_VALUE + 1))) % (TIMER_MAX_VALUE + 1);
-		  UART_print_formatted("ticks = %d\n", ticks);
+	  /*
+	   * Layout of activity steps:
+	   * 1. Calculating the current encoder angle and updating the PID error
+	   * 2. Applying the power using PID updates and power control
+	   * 3. Waiting for the step amount
+	   */
 
-		  float PWM_duty_cycle = ((ticks) / (1100.0f)) * 100.0f;
-		  UART_print_formatted("dc = %d\n", (int)PWM_duty_cycle);
-		  newTheta = (UNITS_FULL_CIRCLE - 1) - ((PWM_duty_cycle - dcMin) * UNITS_FULL_CIRCLE) / (dcMax - dcMin + 1);
-		  UART_print_formatted("theta = %d\n", (int)newTheta);
-		  capture_done_flag = false;
-	  }
+	  // 1. Calculate the new angle and update the PID error:
+	  calculateNewEncoderAngle(&currentAngle, &currentTurns);
+	  if (true) continue;
 
-	  // Step 2. Move the elevator accordingly towards the desired angle
-	  // 		 by setting the the power, and PID check the angle difference
-	  //	     as in the step deviation.
-	  HAL_Delay(20);
-	  if (false) continue;
-	  if (up) {
-	        errorAngle = totalTargetAngle - ((turns * UNITS_FULL_CIRCLE) + newTheta);
-	        UART_print_formatted("Current error angle is: %d", (int)errorAngle);
-	        if (errorAngle > 0) {
-				  if (powerOutput > 4) {
-					  offset = 30;
-				  } else {
-					  offset = 0;
-				  }
-	        }
+	  updatePIDError(pid, (double)currentAngle);
+	  UART_print_formatted("PIDERR=%d", (int)pid->values.currentError);
 
-	      } else {
-	        errorAngle = (targetAngle % UNITS_FULL_CIRCLE) - newTheta;
-	        if (powerOutput > 4) {
-	        	offset = -40;
-	        } else {
-	        	offset = 0;
-	        }
-	      }
+	  // 2. Calculate the new normalized [-1,1] PID speed and update the motor
+	  //    to it with that new speed:
+	  double normalizedPowerControl = calculateNormalizedPIDControlValue(pid);
+	  updateMotorSpeed(normalizedPowerControl, 300);
 
-	      TIM3->CCR2 = 1500 + offset; // Apply turning speed elevator servo
-	      HAL_Delay(20);
-
-
+	  HAL_Delay(STEP_TIME_MS);
   }
-}
-float myPD(uint32_t totalTargetAngle) {
-    uint32_t currentTime = HAL_GetTick();
-   // dt = currentTime - previousTime;
-   // previousTime = currentTime;
-
-    currentAngle = (fabs(turns) * UNITS_FULL_CIRCLE) + newTheta;
-    int error = totalTargetAngle - currentAngle;
-    //float derivative = error - prevError; // Calculate the derivative term
-    //prevError = error;
-
-    float power = fabs(error) * KP; // Add the derivative term
-    return power;
 }
 
 
@@ -336,8 +350,7 @@ float myPD(uint32_t totalTargetAngle) {
   * @brief System Clock Configuration
   * @retval None
   */
-void SystemClock_Config(void)
-{
+void SystemClock_Config(void) {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
@@ -383,8 +396,7 @@ void SystemClock_Config(void)
   * @param None
   * @retval None
   */
-static void MX_USART2_UART_Init(void)
-{
+static void MX_USART2_UART_Init(void) {
 
   /* USER CODE BEGIN USART2_Init 0 */
 
