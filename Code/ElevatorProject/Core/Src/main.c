@@ -170,7 +170,7 @@ void EXTI3_IRQHandler(void)
 
     if (!debounce_done && !(GPIOB->IDR & GPIO_IDR_3))
     {
-        // Button is pressed (assuming it's stable after debounce)
+        
         debounce_done = true;
         start_time = HAL_GetTick();
     }
@@ -181,8 +181,7 @@ void EXTI3_IRQHandler(void)
 
         if ((end_time - start_time) < 50)
         {
-            // Short press action
-            GPIOB->ODR ^= GPIO_ODR_5; // Toggle LED on PB5
+            
         }
         else
         {
@@ -214,8 +213,7 @@ void EXTI15_10_IRQHandler(void)
 
             if ((end_time2 - start_time2) < 50)
             {
-                // Short press action
-                // GPIOA->ODR ^= GPIO_ODR_8; // Toggle LED on PA8 (assuming PA8 is connected to an LED)
+               
             }
             else
             {
@@ -223,7 +221,7 @@ void EXTI15_10_IRQHandler(void)
                 if (desiredFloor < MINFLOOR) desiredFloor = MINFLOOR;
             }
 
-            debounce_done = false; // Reset debounce flag
+            debounce_done = false; 
         }
     }
 }
