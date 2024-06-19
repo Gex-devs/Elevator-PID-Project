@@ -80,7 +80,11 @@ double calculateNormalizedPIDControlValue(PIDController *controller) {
                           (controller->constants.Kd * controller->values.derivative);
 
     // Normalize control value based on maximum control effort:
-    double maxControlEffort = controller->constants.Kp * controller->constants.maxError;
+    double maxControlEffort = controller->constants.Kp * fabs(controller->constants.maxError);
+    if (maxControlEffort == 0.0) {
+        return 0.0; // Prevent division by zero if maxError is zero.
+    }
+
     double normalizedControlValue = controlValue / maxControlEffort;
     normalizedControlValue = fmax(fmin(normalizedControlValue, 1.0), -1.0);
 

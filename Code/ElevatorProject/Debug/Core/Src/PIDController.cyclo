@@ -2,4 +2,4 @@
 ../Core/Src/PIDController.c:35:5:updatePIDError	2
 ../Core/Src/PIDController.c:44:6:setPIDStep	2
 ../Core/Src/PIDController.c:55:8:getPIDTimeDelta	2
-../Core/Src/PIDController.c:63:8:calculateNormalizedPIDControlValue	2
+../Core/Src/PIDController.c:63:8:calculateNormalizedPIDControlValue	3
