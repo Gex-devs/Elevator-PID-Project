@@ -2,6 +2,8 @@
 
 This project involves designing and programming a four-floor elevator model using an STM32 NUCLEO embedded board. It focuses on smooth motion control using PID feedback, speed control, and optional IoT integration for data visualization and configuration.
 
+![Video](ElevatorProject/Documentation/preview.gif)
+
 ## **Features**
 - **PID Feedback Control**: Ensures precise positioning of the elevator for smooth floor transitions.
 - **Speed Control**: Limits the elevator's speed during motion for safe operation.
